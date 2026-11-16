@@ -91,6 +91,44 @@ def apply_rules(row: dict[str, str], known_rules: dict[tuple[str, str], str], fi
             row[clean_column], row[status_column] = raw, "pending"
 
 
+def approved_grapes(rows: list[dict[str, str]],
+                    known_rules: dict[tuple[str, str], str]) -> set[str]:
+    """Return individual grape names from previously approved grape lists."""
+    approved = set()
+    for (field, _), clean in known_rules.items():
+        if field == "grape":
+            approved.update(grape for grape in initial_grapes(clean).split(" | ") if grape)
+    _, clean_column, status_column = FIELDS["grape"]
+    for row in rows:
+        if row.get(status_column) == "reviewed":
+            approved.update(
+                grape for grape in initial_grapes(row.get(clean_column, "")).split(" | ")
+                if grape
+            )
+    return approved
+
+
+def approve_known_grape_lists(rows: list[dict[str, str]],
+                              known_rules: dict[tuple[str, str], str]) -> int:
+    """Review pending lists automatically when every component is known.
+
+    This handles harmless ordering and punctuation variants without changing
+    their original source wording in the working database.
+    """
+    approved = approved_grapes(rows, known_rules)
+    _, clean_column, status_column = FIELDS["grape"]
+    automatically_reviewed = 0
+    for row in rows:
+        if row.get(status_column) != "pending":
+            continue
+        clean = initial_grapes(row.get(clean_column, ""))
+        components = {grape for grape in clean.split(" | ") if grape}
+        if components and components <= approved:
+            row[clean_column], row[status_column] = clean, "reviewed"
+            automatically_reviewed += 1
+    return automatically_reviewed
+
+
 def import_rows() -> None:
     source = read_csv(INPUT)
     if not source:
@@ -151,8 +189,11 @@ def import_rows() -> None:
     for row in database + new_rows:
         if row.get("grapes_clean"):
             row["grapes_clean"] = initial_grapes(row["grapes_clean"])
+    automatically_reviewed = approve_known_grape_lists(database + new_rows, known_rules)
     write_csv(DATABASE, SOURCE_COLUMNS + EXTRA_COLUMNS, database + new_rows)
     print(f"Imported {len(new_rows)} new row(s); synchronized {updated} existing row(s).")
+    if automatically_reviewed:
+        print(f"Automatically reviewed {automatically_reviewed} grape list variant(s) using approved grape names.")
     if repaired:
         print(f"Removed {repaired} obsolete blank-ID row(s) created before the ID was corrected.")
 
@@ -208,9 +249,9 @@ def review_prompt(has_suggestions: bool) -> str:
             "          [s] skip for later  ·  [q] stop review\n  › "
         )
     return (
-        "  No numbered suggestions are available for this value.\n"
-        "  Action  [Enter] keep  ·  [text] replace  ·  "
-        "[s] skip for later  ·  [q] stop review\n  › "
+        "  No numbered suggestions are available for this value.\n\n"
+        "  Action:  [Enter] keep  ·  [text] replace  ·  "
+        "[s] skip for later  ·  [q] stop review\n  \n› "
     )
 
 
@@ -275,6 +316,23 @@ def saved_suggestions(rows: list[dict[str, str]], field: str,
     return [(clean, sources) for _, clean, sources in scored[:3]]
 
 
+def grape_suggestions(grape: str, rows: list[dict[str, str]],
+                      known_rules: dict[tuple[str, str], str]) -> list[str]:
+    """Offer likely corrections for one unapproved grape name.
+
+    A blend is context, not a correction candidate: comparing whole blends can
+    make an unrelated saved blend look like a choice.  Compare the component
+    currently being checked with individual grapes that are already approved.
+    """
+    matches = []
+    for approved in approved_grapes(rows, known_rules):
+        score = difflib.SequenceMatcher(None, grape.casefold(), approved.casefold()).ratio()
+        if score >= 0.72:
+            matches.append((score, approved))
+    matches.sort(key=lambda item: (-item[0], item[1].casefold()))
+    return [approved for _, approved in matches[:3]]
+
+
 def print_review_summary(field: str, saved: int, kept: int, suggestions: int,
                          replacements: int, skipped: int) -> None:
     """Make the outcome of a review session clear before returning to the shell."""
@@ -303,6 +361,11 @@ def review(field: str, full_audit: bool = False) -> None:
     if not rows:
         raise SystemExit("No working database yet. Run: python3 wine_manager.py import")
     raw_column, clean_column, status_column = FIELDS[field]
+    if field == "grape":
+        automatically_reviewed = approve_known_grape_lists(rows, rules())
+        if automatically_reviewed:
+            write_csv(DATABASE, SOURCE_COLUMNS + EXTRA_COLUMNS, rows)
+            print(f"Automatically reviewed {automatically_reviewed} grape list variant(s) using approved grape names.")
     counts = candidate_values(rows, field)
     known = rules()
     unresolved = [
@@ -317,42 +380,96 @@ def review(field: str, full_audit: bool = False) -> None:
     saved = kept = suggestions = replacements = skipped = 0
     review_header(field, len(unresolved), full_audit)
     for position, raw in enumerate(sorted(unresolved, key=ordering), start=1):
+        # A decision earlier in this session may have approved all components
+        # of a later source variant. It no longer needs to interrupt review.
+        if field == "grape":
+            normalized = initial_grapes(raw)
+            components = {grape for grape in normalized.split(" | ") if grape}
+            if components and components <= approved_grapes(rows, known):
+                for row in rows:
+                    if normalise_space(row.get(raw_column, "")) == raw:
+                        row[clean_column], row[status_column] = normalized, "reviewed"
+                write_csv(DATABASE, SOURCE_COLUMNS + EXTRA_COLUMNS, rows)
+                continue
         # Grapes are reviewed as their analysis value, rather than the source
         # notation for their proportions (for example, "100% Pecorino").
         # Keep ``raw`` for looking up and saving the source-specific rule.
         review_value = initial_grapes(raw) if field == "grape" else raw
-        # Keep exact matches too.  They commonly arise when two source
-        # spellings normalise to the same grape list (for example, accents or
-        # proportion notation).  In that case the previously approved list is
-        # still useful confirmation rather than a reason to review it blind.
-        matches = saved_suggestions(rows, field, known, review_value)
         print(f"\n{'─' * 64}")
         print(f"  {position:>2} of {len(unresolved):<2}   {field.title().upper()}   ·   found in {counts[raw]} row(s)")
-        print("\n  VALUE TO REVIEW")
-        print(f"\n    {review_value}")
-        if matches:
-            print("\n  PREVIOUSLY SAVED CORRECTIONS")
-            for number, (match, sources) in enumerate(matches, start=1):
-                print(f"   {number:>2}   {match}")
-                if sources:
-                    print(f"        saved for: {sources[0]}")
-        else:
-            print("\n  SIMILAR VALUES\n  No close existing values found.")
-        print()
-        answer = ask(review_prompt(bool(matches)))
-        if answer is None or answer.lower() == "q":
-            break
-        if answer.lower() == "s":
-            skipped += 1
-            continue
-        if answer.isdigit() and 1 <= int(answer) <= len(matches):
-            clean = matches[int(answer) - 1][0]
-            decision = "suggestion"
-        else:
-            clean = answer or (initial_grapes(raw) if field == "grape" else raw)
-            decision = "replacement" if answer else "kept"
         if field == "grape":
-            clean = initial_grapes(clean)
+            unknown_grapes = [
+                grape for grape in review_value.split(" | ")
+                if grape not in approved_grapes(rows, known)
+            ]
+            print("\n  NORMALIZED GRAPE LIST TO REVIEW")
+            print(f"\n    ───>  {review_value}")
+            print("\n  This list needs review because these grape name(s) are not yet approved:")
+            print("    " + " | ".join(unknown_grapes))
+
+            # Resolve only the components which caused this blend to stop.
+            # The other grapes are already approved and should not have to be
+            # re-entered just because they occur alongside a new spelling.
+            component_replacements: dict[str, str] = {}
+            component_decisions: list[str] = []
+            skip_list = stop_review = False
+            for grape in unknown_grapes:
+                matches = grape_suggestions(grape, rows, known)
+                print("\n  GRAPE TO REVIEW")
+                print(f"\n    {grape}")
+                if matches:
+                    print("\n  SUGGESTED CORRECTIONS")
+                    for number, match in enumerate(matches, start=1):
+                        print(f"\n   {number:>2}   {match}")
+                else:
+                    print("\n  No close approved grape names found.")
+                answer = ask(review_prompt(bool(matches)))
+                if answer is None or answer.lower() == "q":
+                    stop_review = True
+                    break
+                if answer.lower() == "s":
+                    skip_list = True
+                    break
+                if answer.isdigit() and 1 <= int(answer) <= len(matches):
+                    component_replacements[grape] = matches[int(answer) - 1]
+                    component_decisions.append("suggestion")
+                else:
+                    component_replacements[grape] = normalise_space(answer) or grape
+                    component_decisions.append("replacement" if answer else "kept")
+            if stop_review:
+                break
+            if skip_list:
+                skipped += 1
+                continue
+            clean = initial_grapes(" | ".join(
+                component_replacements.get(grape, grape)
+                for grape in review_value.split(" | ")
+            ))
+
+            # Check the newly reviewed components before offering the final
+            # save of the complete, reconstructed list.
+            component_counts = grape_counts(rows, raw, clean)
+            approved = True
+            for grape in dict.fromkeys(component_replacements.values()):
+                if component_counts[grape] > 2:
+                    continue
+                print("\n  ANOMALY CHECK")
+                print("  " + "─" * 56)
+                print("  Uncommon grape:\n")
+                print(f"    {grape}")
+                confirmation = ask(
+                    f"\n  Appears in only {component_counts[grape]} row(s).\n"
+                    "  Save it anyway? [y/N] "
+                )
+                if confirmation is None or confirmation.lower() not in {"y", "yes"}:
+                    approved = False
+                    break
+            if not approved:
+                if confirmation is None:
+                    break
+                print("  Not saved; this value remains for a later review.")
+                skipped += 1
+                continue
             print_grapes(clean)
             confirmation = ask("  Save this grape list? [Y/n] ")
             if confirmation is None or confirmation.lower() in {"n", "no"}:
@@ -361,27 +478,36 @@ def review(field: str, full_audit: bool = False) -> None:
                 print("  Not saved; this value remains for a later review.")
                 skipped += 1
                 continue
-            components = grape_counts(rows, raw, clean)
-            flagged = [grape for grape in clean.split(" | ") if components[grape] <= 2]
-            approved = True
-            for grape in flagged:
-                print("\n  ANOMALY CHECK")
-                print("  " + "─" * 56)
-                print("  Uncommon grape:\n")
-                print(f"    {grape}")
-                confirmation = ask(
-                    f"\n  Appears in only {components[grape]} row(s).\n"
-                    "  Save it anyway? [y/N] "
-                )
-                if confirmation is None or confirmation.lower() not in {"y", "yes"}:
-                    print("  Not saved; this value remains for a later review.")
-                    approved = False
-                    break
-            if not approved:
-                if confirmation is None:
-                    break
+            decision = (
+                "replacement" if "replacement" in component_decisions
+                else "suggestion" if "suggestion" in component_decisions
+                else "kept"
+            )
+        else:
+            print("\n  VALUE TO REVIEW")
+            matches = saved_suggestions(rows, field, known, review_value)
+            print(f"\n    {review_value}")
+            if matches:
+                print("\n  PREVIOUSLY SAVED CORRECTIONS")
+                for number, (match, sources) in enumerate(matches, start=1):
+                    print(f"\n   {number:>2}   {match}")
+                    if sources:
+                        print(f"        saved for: {sources[0]}")
+            else:
+                print("\n  SIMILAR VALUES\n  No close existing values found.")
+            print()
+            answer = ask(review_prompt(bool(matches)))
+            if answer is None or answer.lower() == "q":
+                break
+            if answer.lower() == "s":
                 skipped += 1
                 continue
+            if answer.isdigit() and 1 <= int(answer) <= len(matches):
+                clean = matches[int(answer) - 1][0]
+                decision = "suggestion"
+            else:
+                clean = answer or raw
+                decision = "replacement" if answer else "kept"
         save_rule(field, raw, clean)
         # The queue was assembled before this interactive session started.
         # Make each decision available immediately, so a later spelling with

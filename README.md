@@ -28,17 +28,17 @@ Start with grapes:
 python3 wine_manager.py review grape
 ```
 
-The program presents rare, unreviewed values (one or two occurrences), one at a time, with nearby spellings where it finds them. At each prompt you can:
+The program presents rare, unreviewed values (one or two occurrences), one at a time, with nearby spellings where it finds them. For grapes, it automatically reviews a reordered or punctuation-only variant when every grape in its normalized list has already been approved. It only asks you about a normalized grape list when it contains at least one grape name not yet approved. At each prompt you can:
 
 - Press **Enter** to keep the displayed value (for grapes, it is converted into an alphabetically sorted list).
-- Enter a **number** to use the matching numbered suggestion. When no close existing value is found, the interface explicitly says that no numbered suggestions are available; simply press Enter to keep the value or type a replacement.
+- Enter a **number** to use a displayed suggestion. Grape suggestions are based on the individual grape currently being checked, rather than an unrelated whole blend.
 - Type replacement text to save your own wording. For a blend, enter its grape names naturally, for example `Terret, Riesling`; the program displays the resulting sorted grape list before saving.
 - Enter **`s`** to skip just that value and return to it in a later review.
 - Enter **`q`** or press **Ctrl-D** to end the current review. Earlier decisions are already saved.
 
-For grapes, the review prompt shows the analysis value rather than proportion notation: for example, `100% Pecorino` is shown as `Pecorino`. The original source value is retained and used when the saved decision is applied on future imports.
+For grapes, the review prompt first shows the normalized blend, then explains why it stopped for review, and asks only about each unapproved grape in that blend. The approved grapes stay in place automatically. It checks each newly reviewed grape for uncommon values, then shows the reconstructed list for a final save confirmation. It shows the analysis value rather than proportion notation: for example, `100% Pecorino` is shown as `Pecorino`. The original source value is retained in `wine_database.csv` and is never changed.
 
-Before saving a grape list, the program shows each grape on its own line and asks for confirmation. It then verifies each individual grape in the resulting list: a grape that occurs in only one or two rows is flagged and requires an explicit `y` confirmation. This catches uncommon components even when the complete blend wording has been replaced.
+Before saving a grape list, the program checks each newly reviewed grape that occurs in only one or two rows and requires an explicit `y` confirmation. It then shows the complete list on its own lines and asks for confirmation.
 
 At the end of every review, a short summary reports how many decisions were saved, kept, corrected from a suggestion, typed manually, or skipped. Choosing `s` or declining either grape confirmation counts as skipped for later.
 
@@ -50,7 +50,7 @@ The normal review deliberately focuses on values that appear once or twice. To c
 python3 wine_manager.py review grape --all
 ```
 
-Full audit lists frequent values first. Saving `Chardonay` as `Chardonnay` updates every matching current row and stores that rule for future imports. Later reviews offer up to three previously saved corrections, showing both the proposed clean value and the earlier source value it was saved for. This makes it clear when an identical normalised grape list came from a prior correction rather than merely duplicating the value on screen. A decision made earlier in the same review session becomes a suggestion immediately.
+Full audit lists frequent values first. Saving `Chardonay` as `Chardonnay` updates every matching current row and stores that rule for future imports. Later grape reviews offer up to three likely approved grape-name corrections for the specific component being checked. A decision made earlier in the same review session becomes available immediately.
 
 Repeat with:
 
@@ -59,7 +59,7 @@ python3 wine_manager.py review producer
 python3 wine_manager.py review appellation
 ```
 
-Each confirmed choice is stored in `cleaning_rules.csv`. The next import uses it automatically. If you change a controlled source value, such as `Grape/Vine`, its clean value is refreshed and marked `pending` unless an existing rule covers the new wording. A change to an unrelated field, such as `Review`, does not disturb prior cleaning decisions.
+Each confirmed choice is stored in `cleaning_rules.csv`. The next import uses it automatically. If you change a controlled source value, such as `Grape/Vine`, its clean value is refreshed and marked `pending` unless an existing rule covers the new wording or all grapes in its normalized list are already approved. A change to an unrelated field, such as `Review`, does not disturb prior cleaning decisions.
 
 ## Columns added to the working database
 
